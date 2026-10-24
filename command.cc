@@ -31,16 +31,43 @@
 
 void parse(std::vector<Token> &tokens)
 {
-    Command currentCommand;
-    SimpleCommand *currentSimpleCommand = new SimpleCommand();
+ Command &command = Command::_currentCommand;
 
-    currentCommand.execute();
-    /*
-      Implement this function 
-      you must parse for all possible tokens scenario
-      right now command.execute only print the format , you will inject it in your logic.
+    command.clear();
 
-    */
+    SimpleCommand *simpleCommand = new SimpleCommand();
+    command.insertSimpleCommand(simpleCommand);
+
+    bool unsupportedOperator = false;
+
+    for (const Token &token : tokens)
+    {
+        if (token.type == TOKEN_EOF)
+        {break;}
+
+        if (token.type == TOKEN_COMMAND ||
+            token.type == TOKEN_ARGUMENT)
+        {   char *argument = strdup(token.value.c_str());
+            simpleCommand->insertArgument(argument);
+        }
+        else
+        {
+            std::cerr << "This operator is not implemented yet: "
+                      << token.value << std::endl;
+
+            unsupportedOperator = true;
+            break;
+        }
+    }
+
+    if (unsupportedOperator ||
+        simpleCommand->_numberOfArguments == 0)
+    {
+        command.clear();
+        return;
+    }
+
+    command.execute();
 }
 
 SimpleCommand::SimpleCommand()
@@ -67,15 +94,18 @@ void SimpleCommand::insertArgument(char *argument)
 
 Command::Command()
 {
-    _numberOfAvailableSimpleCommands = 1;
-    _simpleCommands = (SimpleCommand **)
-        malloc(_numberOfSimpleCommands * sizeof(SimpleCommand *));
-
+   _numberOfAvailableSimpleCommands = 1;
     _numberOfSimpleCommands = 0;
-    _outFile = 0;
-    _inputFile = 0;
-    _errFile = 0;
+
+    _simpleCommands = (SimpleCommand **)
+        malloc(_numberOfAvailableSimpleCommands * sizeof(SimpleCommand *));
+
+    _outFile = nullptr;
+    _inputFile = nullptr;
+    _errFile = nullptr;
+    _out_error = 0;
     _background = 0;
+    _append = 0;
 }
 
 void Command::insertSimpleCommand(SimpleCommand *simpleCommand)
@@ -120,10 +150,12 @@ void Command::clear()
     }
 
     _numberOfSimpleCommands = 0;
-    _outFile = 0;
-    _inputFile = 0;
-    _errFile = 0;
+    _outFile = nullptr;
+    _inputFile = nullptr;
+    _errFile = nullptr;
+    _out_error = 0;
     _background = 0;
+    _append = 0;
 }
 
 void Command::print()
@@ -154,23 +186,51 @@ void Command::print()
 
 void Command::execute()
 {
-    print();
-    /*
-        Write your code here
-    */
+ if (_numberOfSimpleCommands == 0 ||
+        _simpleCommands[0]->_numberOfArguments == 0)
+    {
+        clear();
+        return;
+    }
+
+    SimpleCommand *simpleCommand = _simpleCommands[0];
+
+    pid_t pid = fork();
+
+    if (pid < 0)
+    {
+        perror("fork");
+        clear();
+        return;
+    }
+
+    if (pid == 0)
+    {
+        execvp(simpleCommand->_arguments[0],
+               simpleCommand->_arguments);
+
+        perror("execvp");
+        _exit(127);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
 
     clear();
-    prompt();
+    
 }
 
 void Command::prompt()
 {
-    printf("myshell>");
-    fflush(stdout);
+    
+    
     std::string input;
     while (true)
-    {
-        std::getline(std::cin, input); 
+    {   printf("myshell>");
+        fflush(stdout);
+
+      if (!std::getline(std::cin, input))
+        {break;}
         std::vector<Token> tokens = tokenize(input);
         parse(tokens);
     }
