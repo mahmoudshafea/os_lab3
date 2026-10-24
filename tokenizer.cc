@@ -1,64 +1,77 @@
 #include "tokenizer.h"
-#include <sstream>
-#include <iostream>
+#include <cctype>
 
 std::vector<Token> tokenize(const std::string &input)
 {
     std::vector<Token> tokens;
-    std::istringstream stream(input);
     std::string word;
+    char quote = 0;
 
-    while (stream >> word)
+    for (int i = 0; i < input.size(); i++)
     {
-        Token token;
+        char c = input[i];
 
-        if (word == "|")
-            token.type = TOKEN_PIPE;
-        else if (word == ">")
-            token.type = TOKEN_REDIRECT;
-        else if (word == ">>")
-            token.type = TOKEN_APPEND;
-        else if (word == "<")
-            token.type = TOKEN_INPUT;
-        else if (word == "&")
-            token.type = TOKEN_BACKGROUND;
-        else if (word == "2>")
-            token.type = TOKEN_ERROR;
-        else if (word == ">>&")
-            token.type = TOKEN_REDIRECT_AND_ERROR;
-        else
+        if (quote)
+        {
+            if (c == quote) quote = 0;
+            else word += c;
+            continue;
+        }
+
+        if (c == '"' || c == '\'')
+        {
+            quote = c;
+            continue;
+        }
+
+        if (isspace(c))
+        {
+            if (!word.empty())
             {
-                if (!tokens.empty())
-                {
-                    Token &prev = tokens.back();
-                    if (prev.type == TOKEN_REDIRECT ||
-                        prev.type == TOKEN_APPEND ||
-                        prev.type == TOKEN_INPUT ||
-                        prev.type == TOKEN_ERROR || 
-                        prev.type == TOKEN_REDIRECT_AND_ERROR ||
-                        prev.type == TOKEN_COMMAND || 
-                        prev.type == TOKEN_ARGUMENT || 
-                        word[0] == '-' ||
-                        word.find('/') != std::string::npos ||
-                        word.find('.') != std::string::npos
+                TokenType type = tokens.empty() || tokens.back().type == TOKEN_PIPE
+                    ? TOKEN_COMMAND : TOKEN_ARGUMENT;
+                tokens.push_back({type, word});
+                word.clear();
+            }
+            continue;
+        }
 
-                    )
-                    {
-                        token.type = TOKEN_ARGUMENT;
-                    }
-                    else
-                    {
-                        token.type = TOKEN_COMMAND;
-                    }
-                }
-                else
-                {
-                    token.type = TOKEN_COMMAND;
-                }
+        std::string op;
+        if (input.compare(i, 3, ">>&") == 0) op = ">>&";
+        else if (input.compare(i, 2, "2>") == 0) op = "2>";
+        else if (input.compare(i, 2, ">>") == 0) op = ">>";
+        else if (c == '>' || c == '<' || c == '|' || c == '&') op = c;
+
+        if (!op.empty())
+        {
+            if (!word.empty())
+            {
+                TokenType type = tokens.empty() || tokens.back().type == TOKEN_PIPE
+                    ? TOKEN_COMMAND : TOKEN_ARGUMENT;
+                tokens.push_back({type, word});
+                word.clear();
             }
 
-        token.value = word;
-        tokens.push_back(token);
+            TokenType type;
+            if (op == ">") type = TOKEN_REDIRECT;
+            else if (op == ">>") type = TOKEN_APPEND;
+            else if (op == "<") type = TOKEN_INPUT;
+            else if (op == "2>") type = TOKEN_ERROR;
+            else if (op == ">>&") type = TOKEN_REDIRECT_AND_ERROR;
+            else if (op == "|") type = TOKEN_PIPE;
+            else type = TOKEN_BACKGROUND;
+
+            tokens.push_back({type, op});
+            i += op.size() - 1;
+        }
+        else word += c;
+    }
+
+    if (!word.empty())
+    {
+        TokenType type = tokens.empty() || tokens.back().type == TOKEN_PIPE
+            ? TOKEN_COMMAND : TOKEN_ARGUMENT;
+        tokens.push_back({type, word});
     }
 
     tokens.push_back({TOKEN_EOF, ""});
