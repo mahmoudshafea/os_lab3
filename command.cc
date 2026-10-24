@@ -1,6 +1,5 @@
 #include "command.h"
 #include "tokenizer.h"
-
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -8,9 +7,11 @@
 #include <cstring>
 #include <cstdlib>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <cerrno>
 
 using namespace std;
 
@@ -32,17 +33,20 @@ void checkChildren()
     int status;
     pid_t pid;
 
+    childFinished = 0;
+
     while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
         logChild(pid);
-
-    childFinished = 0;
 }
 
 SimpleCommand::SimpleCommand()
 {
     _numberOfAvailableArguments = 5;
     _numberOfArguments = 0;
-    _arguments = (char **)malloc(5 * sizeof(char *));
+    _arguments = (char **)malloc(
+        _numberOfAvailableArguments * sizeof(char *)
+    );
+
     _arguments[0] = NULL;
 }
 
@@ -51,6 +55,7 @@ void SimpleCommand::insertArgument(char *argument)
     if (_numberOfArguments + 1 >= _numberOfAvailableArguments)
     {
         _numberOfAvailableArguments *= 2;
+
         _arguments = (char **)realloc(
             _arguments,
             _numberOfAvailableArguments * sizeof(char *)
@@ -66,7 +71,9 @@ Command::Command()
     _numberOfAvailableSimpleCommands = 1;
     _numberOfSimpleCommands = 0;
 
-    _simpleCommands = (SimpleCommand **)malloc(sizeof(SimpleCommand *));
+    _simpleCommands = (SimpleCommand **)malloc(
+        _numberOfAvailableSimpleCommands * sizeof(SimpleCommand *)
+    );
 
     _outFile = NULL;
     _inputFile = NULL;
@@ -111,6 +118,7 @@ void Command::clear()
     free(_errFile);
 
     _numberOfSimpleCommands = 0;
+
     _outFile = NULL;
     _inputFile = NULL;
     _errFile = NULL;
@@ -122,18 +130,20 @@ void Command::clear()
 
 void Command::print()
 {
-    for (int i = 0; i < _numberOfSimpleCommands; i++)
+   for (int i = 0; i < _numberOfSimpleCommands; i++)
     {
-        cout << "Command " << i + 1 << ": ";
-
         for (int j = 0;
              j < _simpleCommands[i]->_numberOfArguments; j++)
         {
             cout << _simpleCommands[i]->_arguments[j] << " ";
         }
 
-        cout << endl;
+        if (i < _numberOfSimpleCommands - 1)
+            cout << "| ";
+
     }
+
+    cout << endl;
 
     if (_inputFile)
         cout << "Input: " << _inputFile << endl;
@@ -144,7 +154,114 @@ void Command::print()
     if (_errFile)
         cout << "Error: " << _errFile << endl;
 
-    cout << "Background: " << (_background ? "YES" : "NO") << endl;
+    if (_background)
+        cout << "Background: YES" << endl;
+}
+
+void parse(vector<Token> &tokens)
+{
+    Command currentCommand;
+    SimpleCommand *currentSimpleCommand = new SimpleCommand();
+
+    currentCommand.insertSimpleCommand(currentSimpleCommand);
+
+    bool bad = false;
+
+    for (int i = 0; tokens[i].type != TOKEN_EOF; i++)
+    {
+        Token token = tokens[i];
+
+        if (token.type == TOKEN_PIPE)
+        {
+            if (currentSimpleCommand->_numberOfArguments == 0)
+            {
+                cerr << "Missing command before pipe\n";
+                bad = true;
+                break;
+            }
+
+            currentSimpleCommand = new SimpleCommand();
+            currentCommand.insertSimpleCommand(currentSimpleCommand);
+        }
+        else if (token.type == TOKEN_BACKGROUND)
+        {
+            if (tokens[i + 1].type != TOKEN_EOF)
+            {
+                cerr << "& must be at the end\n";
+                bad = true;
+                break;
+            }
+
+            currentCommand._background = 1;
+        }
+        else if (token.type == TOKEN_REDIRECT ||
+                 token.type == TOKEN_APPEND ||
+                 token.type == TOKEN_INPUT ||
+                 token.type == TOKEN_ERROR ||
+                 token.type == TOKEN_REDIRECT_AND_ERROR)
+        {
+            TokenType nextType = tokens[i + 1].type;
+
+            if (nextType == TOKEN_EOF ||
+                nextType == TOKEN_PIPE ||
+                nextType == TOKEN_BACKGROUND ||
+                nextType == TOKEN_REDIRECT ||
+                nextType == TOKEN_APPEND ||
+                nextType == TOKEN_INPUT ||
+                nextType == TOKEN_ERROR ||
+                nextType == TOKEN_REDIRECT_AND_ERROR)
+            {
+                cerr << "Missing filename after redirection\n";
+                bad = true;
+                break;
+            }
+
+            char *file = strdup(tokens[++i].value.c_str());
+
+            if (token.type == TOKEN_INPUT)
+            {
+                free(currentCommand._inputFile);
+                currentCommand._inputFile = file;
+            }
+            else if (token.type == TOKEN_ERROR)
+            {
+                free(currentCommand._errFile);
+                currentCommand._errFile = file;
+            }
+            else
+            {
+                free(currentCommand._outFile);
+                currentCommand._outFile = file;
+
+                currentCommand._append =
+                    token.type == TOKEN_APPEND ||
+                    token.type == TOKEN_REDIRECT_AND_ERROR;
+
+                currentCommand._out_error =
+                    token.type == TOKEN_REDIRECT_AND_ERROR;
+            }
+        }
+        else
+        {
+            currentSimpleCommand->insertArgument(
+                strdup(token.value.c_str())
+            );
+        }
+    }
+
+    if (currentSimpleCommand->_numberOfArguments == 0)
+    {
+        cerr << "Missing command\n";
+        bad = true;
+    }
+
+    if (bad)
+    {
+        currentCommand.clear();
+        return;
+    }
+
+    currentCommand.execute();
 }
 
 void Command::execute()
@@ -158,14 +275,16 @@ void Command::execute()
 
     char *name = _simpleCommands[0]->_arguments[0];
 
-    if (strcmp(name, "exit") == 0)
+    if (_numberOfSimpleCommands == 1 &&
+        strcmp(name, "exit") == 0)
     {
         clear();
         cout << "Good bye!!" << endl;
         exit(0);
     }
 
-    if (strcmp(name, "cd") == 0)
+    if (_numberOfSimpleCommands == 1 &&
+        strcmp(name, "cd") == 0)
     {
         char *dir = _simpleCommands[0]->_arguments[1];
 
@@ -191,8 +310,10 @@ void Command::execute()
             if (pipe(fd) == -1)
             {
                 perror("pipe");
+
                 if (input != -1)
                     close(input);
+
                 clear();
                 return;
             }
@@ -203,12 +324,16 @@ void Command::execute()
         if (pid == -1)
         {
             perror("fork");
+
             if (input != -1)
                 close(input);
+
             if (fd[0] != -1)
                 close(fd[0]);
+
             if (fd[1] != -1)
                 close(fd[1]);
+
             clear();
             return;
         }
@@ -218,15 +343,29 @@ void Command::execute()
             signal(SIGINT, SIG_DFL);
 
             if (input != -1)
-                dup2(input, STDIN_FILENO);
+            {
+                if (dup2(input, STDIN_FILENO) == -1)
+                {
+                    perror("dup2");
+                    _exit(1);
+                }
+            }
 
             if (fd[1] != -1)
-                dup2(fd[1], STDOUT_FILENO);
+            {
+                if (dup2(fd[1], STDOUT_FILENO) == -1)
+                {
+                    perror("dup2");
+                    _exit(1);
+                }
+            }
 
             if (input != -1)
                 close(input);
+
             if (fd[0] != -1)
                 close(fd[0]);
+
             if (fd[1] != -1)
                 close(fd[1]);
 
@@ -240,7 +379,13 @@ void Command::execute()
                     _exit(1);
                 }
 
-                dup2(file, STDIN_FILENO);
+                if (dup2(file, STDIN_FILENO) == -1)
+                {
+                    perror("dup2");
+                    close(file);
+                    _exit(1);
+                }
+
                 close(file);
             }
 
@@ -262,10 +407,22 @@ void Command::execute()
                     _exit(1);
                 }
 
-                dup2(file, STDOUT_FILENO);
+                if (dup2(file, STDOUT_FILENO) == -1)
+                {
+                    perror("dup2");
+                    close(file);
+                    _exit(1);
+                }
 
                 if (_out_error)
-                    dup2(file, STDERR_FILENO);
+                {
+                    if (dup2(file, STDERR_FILENO) == -1)
+                    {
+                        perror("dup2");
+                        close(file);
+                        _exit(1);
+                    }
+                }
 
                 close(file);
             }
@@ -284,7 +441,13 @@ void Command::execute()
                     _exit(1);
                 }
 
-                dup2(file, STDERR_FILENO);
+                if (dup2(file, STDERR_FILENO) == -1)
+                {
+                    perror("dup2");
+                    close(file);
+                    _exit(1);
+                }
+
                 close(file);
             }
 
@@ -316,8 +479,15 @@ void Command::execute()
         for (pid_t pid : children)
         {
             int status;
+            pid_t result;
 
-            if (waitpid(pid, &status, 0) > 0)
+            do
+            {
+                result = waitpid(pid, &status, 0);
+            }
+            while (result == -1 && errno == EINTR);
+
+            if (result == pid)
                 logChild(pid);
         }
     }
@@ -336,9 +506,11 @@ void Command::prompt()
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
+
     sa.sa_handler = childSignal;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+
     sigaction(SIGCHLD, &sa, NULL);
 
     string line;
@@ -355,88 +527,7 @@ void Command::prompt()
 
         vector<Token> tokens = tokenize(line);
 
-        Command &cmd = _currentCommand;
-        cmd.clear();
-
-        SimpleCommand *simple = new SimpleCommand();
-        cmd.insertSimpleCommand(simple);
-
-        bool bad = false;
-
-        for (int i = 0; tokens[i].type != TOKEN_EOF; i++)
-        {
-            Token token = tokens[i];
-
-            if (token.type == TOKEN_PIPE)
-            {
-                if (simple->_numberOfArguments == 0)
-                {
-                    cerr << "Missing command before pipe\n";
-                    bad = true;
-                    break;
-                }
-
-                simple = new SimpleCommand();
-                cmd.insertSimpleCommand(simple);
-            }
-            else if (token.type == TOKEN_BACKGROUND)
-            {
-                if (tokens[i + 1].type != TOKEN_EOF)
-                {
-                    cerr << "& must be at the end\n";
-                    bad = true;
-                    break;
-                }
-
-                cmd._background = 1;
-            }
-            else if (token.type == TOKEN_REDIRECT ||
-                     token.type == TOKEN_APPEND ||
-                     token.type == TOKEN_INPUT ||
-                     token.type == TOKEN_ERROR ||
-                     token.type == TOKEN_REDIRECT_AND_ERROR)
-            {
-                if (tokens[i + 1].type == TOKEN_EOF ||
-                    tokens[i + 1].type == TOKEN_PIPE)
-                {
-                    cerr << "Missing filename after redirection\n";
-                    bad = true;
-                    break;
-                }
-
-                char *file = strdup(tokens[++i].value.c_str());
-
-                if (token.type == TOKEN_INPUT)
-                    cmd._inputFile = file;
-                else if (token.type == TOKEN_ERROR)
-                    cmd._errFile = file;
-                else
-                {
-                    cmd._outFile = file;
-                    cmd._append =
-                        token.type == TOKEN_APPEND ||
-                        token.type == TOKEN_REDIRECT_AND_ERROR;
-                    cmd._out_error =
-                        token.type == TOKEN_REDIRECT_AND_ERROR;
-                }
-            }
-            else
-            {
-                simple->insertArgument(strdup(token.value.c_str()));
-            }
-        }
-
-        if (simple->_numberOfArguments == 0)
-            bad = true;
-
-        if (bad)
-        {
-            cerr << "Invalid command\n";
-            cmd.clear();
-            continue;
-        }
-
-        cmd.execute();
+        parse(tokens);
 
         if (childFinished)
             checkChildren();
